@@ -11,6 +11,7 @@ from PIL import Image
 from detectron2.data import transforms as T
 from torch.utils.data import Dataset
 from copy import deepcopy
+from datasets.generate_occ import resize_and_pad
 
 
 def read_list(path):
@@ -96,6 +97,101 @@ class OccDataset(Dataset):
             data['query'] = torch.cat([queries, torch.ones(queries.shape[0], queries.shape[1], 1)], dim=2)
 
         return data
+
+
+class MyOccDataset(Dataset):
+    def __init__(self, img_folder, occ_folder, ids_path, image_set):
+        super().__init__()
+
+        self.resolution = 256
+        self.img_folder = img_folder + '/' + image_set
+        self.occ_folder = occ_folder
+
+        # Data Augmentation
+        self.augmentation = make_transforms(image_set)
+
+        # data_split
+        # self.data_list = read_list(f'{ids_path}/{image_set}_list.txt')
+        # valid_data_list = [x.split('.')[0] for x in os.listdir(self.img_folder)]
+        # self.data_list = list(filter(lambda x: x in self.data_list, valid_data_list))
+        self.data_list = [os.path.basename(x).split('.')[0] for x in os.listdir(f'{img_folder}/{image_set}')]
+
+    def _expand_image_dims(self, x):
+        if len(x.shape) == 2:
+            exp_img = np.expand_dims(x, 0)
+        else:
+            exp_img = x.transpose((2, 0, 1)) # (h,w,c) -> (c,h,w)
+        return exp_img
+    
+    def __len__(self):
+        return len(self.data_list)
+
+    def __getitem__(self, index):
+        name = self.data_list[index]
+        occ_path = f'{self.occ_folder}/{name}.npy'
+        occ_data = np.load(occ_path, allow_pickle=True)
+        
+        img_path = f'{self.img_folder}/{name}.png'
+        img = np.array(Image.open(img_path))
+        # if len(img.shape) == 3:
+        #     img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        #### NEW
+        if len(img.shape) >= 3:
+            if img.shape[-1] > 3: # drop alpha channel
+                img = img[:, :, :3]
+            h, w = img.shape[:-1]
+        else:
+            # print(img.shape, file_name)
+            h, w = img.shape
+        #### NEW
+
+        if h != self.resolution or w != self.resolution:
+            img = resize_and_pad(img, (self.resolution, self.resolution))
+            h, w = img.shape[:2]
+
+        data = {}
+        data["name"] = name
+        data["height"] = h
+        data['width'] = w
+        
+        if self.augmentation is None:
+            data['image'] = (1 / 255) * torch.as_tensor(np.ascontiguousarray(self._expand_image_dims(img)))
+            queries = []
+            occs = []
+            for room_occ in occ_data:
+                query = room_occ['query']
+                occ = room_occ['occ']
+                queries.append(query)
+                occs.append(occ)
+            queries = np.stack(queries, axis=0)
+            occs = np.stack(occs, axis=0)
+            queries = (queries + 0.5) / self.resolution - 0.5
+            queries = torch.as_tensor(queries, dtype=torch.float32)
+            data['occ'] = torch.as_tensor(occs, dtype=torch.float32)
+            data['query'] = torch.cat([queries, torch.ones(queries.shape[0], queries.shape[1], 1)], dim=2)
+        else:
+            aug_input = T.AugInput(img)
+            transforms = self.augmentation(aug_input)
+            image = aug_input.image
+            data['image'] = (1 / 255) * torch.as_tensor(np.array(self._expand_image_dims(image)))
+            queries = []
+            occs = []
+            for room_occ in occ_data:
+                query = room_occ['query']
+                occ = room_occ['occ']
+                query = transforms.apply_coords(query)
+                query[query <= 0] = 0
+                query[query >= 255.0] = 255.0
+                queries.append(query)
+                occs.append(occ)
+            queries = np.stack(queries, axis=0)
+            occs = np.stack(occs, axis=0)
+            queries = (queries + 0.5) / self.resolution - 0.5
+            queries = torch.as_tensor(queries, dtype=torch.float32)
+            data['occ'] = torch.as_tensor(occs, dtype=torch.float32)
+            data['query'] = torch.cat([queries, torch.ones(queries.shape[0], queries.shape[1], 1)], dim=2)
+
+        return data
    
 
 def make_transforms(image_set):
@@ -110,5 +206,8 @@ def make_transforms(image_set):
     
 
 def build(image_set, args):
-    dataset = OccDataset(args.img_folder, args.occ_folder, args.ids_path, image_set)
+    if "input" in args.img_folder:
+        dataset = OccDataset(args.img_folder, args.occ_folder, args.ids_path, image_set)
+    else:
+        dataset = MyOccDataset(args.img_folder, args.occ_folder, args.ids_path, image_set)
     return dataset

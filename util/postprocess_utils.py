@@ -53,9 +53,11 @@ def simplify_polygon(input_poly):
     
     return simplified_poly_np
 
-
 def remove_multi_polygon(polygon_lst):
-    for poly_idx, polygon in enumerate(polygon_lst):
+    # for poly_idx, polygon in enumerate(polygon_lst):
+    # Iterate backwards to avoid index issues when removing items
+    for poly_idx in reversed(range(len(polygon_lst))):
+        polygon = polygon_lst[poly_idx]
         connect_edges = []
         if isinstance(polygon, MultiPolygon):
             poly_eqs = []
@@ -84,8 +86,13 @@ def remove_multi_polygon(polygon_lst):
                 poly_eqs.append(poly_eq)
                 poly_pts.append(poly_pt)
             
-            assert len(poly_v) == len(poly_eqs) == 2
-            
+            # assert len(poly_v) == len(poly_eqs) == 2
+            if len(poly_v) == len(poly_eqs) == 2:
+                # Merge the two polygons directly
+                # merged = unary_union([Polygon(poly_v[0]), Polygon(poly_v[1])])
+                # polygon_lst[poly_idx] = merged
+                polygon_lst.pop(poly_idx)
+                continue
 
             for i, poly_eq in enumerate(poly_eqs):
                 src_polygon = poly_v[i]
@@ -138,14 +145,37 @@ def remove_multi_polygon(polygon_lst):
                 new_edge_points = []
                 new_edge_points.append(edge_points[0])
                 edge_points = np.delete(edge_points, 0, axis=0)
-                while edge_points.shape[0] > 0:
+
+                # New: Add safety counter to prevent infinite loops
+                max_iterations = len(edge_points) * 2
+                iteration_count = 0
+
+                while edge_points.shape[0] > 0 and iteration_count < max_iterations:
+                    iteration_count += 1
+                    found_match = False
+
                     for idx, point in enumerate(edge_points):
                         if point[0] == new_edge_points[-1][0] or point[1] == new_edge_points[-1][1]:
                             new_edge_points.append(point)
                             edge_points = np.delete(edge_points, idx, axis=0)
+                            found_match = True
                             break
-                edge_polygon = Polygon(new_edge_points)                
-                merge_polygon = unary_union([Polygon(src_polygon), Polygon(tgt_polygon), edge_polygon])
+
+                    if not found_match:
+                        # If no matching point found, break to avoid infinite loop
+                        print(f"Warning: Could not connect all edge points for polygon {poly_idx}")
+                        break
+
+                # NEW: Need at least 3 points for a polygon
+                if len(new_edge_points) >= 3:  
+                    edge_polygon = Polygon(new_edge_points)                
+                    merge_polygon = unary_union([Polygon(src_polygon), Polygon(tgt_polygon), edge_polygon])
+                else:
+                    merge_polygon = polygon.geoms[0] if polygon.geoms[0].area > polygon.geoms[1].area else polygon.geoms[1]
+
+            # NEW: Ensure we have a single Polygon before processing
+            if merge_polygon.geom_type == 'MultiPolygon':
+                merge_polygon = max(merge_polygon.geoms, key=lambda p: p.area)
 
             poly_np = np.array(merge_polygon.exterior.coords, dtype=np.uint8)[:-1]
             simplified_poly_np = simplify_polygon(poly_np)
@@ -154,7 +184,11 @@ def remove_multi_polygon(polygon_lst):
             update_polygon = Polygon(poly_np)
             polygon_lst[poly_idx] = update_polygon
 
-    for polygon in polygon_lst:
+    for poly_idx, polygon in enumerate(polygon_lst):
+        if polygon.geom_type == 'MultiPolygon':
+            # Select the largest polygon by area
+            polygon = max(polygon.geoms, key=lambda p: p.area)
+            polygon_lst[poly_idx] = polygon
         assert polygon.geom_type == 'Polygon'
     return polygon_lst
 
@@ -182,15 +216,26 @@ def remove_rooms_with_iou(polygon_list):
             access_mat[idx0][idx1] = 1
             access_mat[idx1][idx0] = 1
     
+    new_polygon_list = []
+    indices_to_ignore = set()
     for remove_index in remove_indices:
         idx0, idx1 = remove_index[0], remove_index[1]
-        polygon0, polygon1 = polygon_list[idx0], polygon_list[1]
+        polygon0, polygon1 = polygon_list[idx0], polygon_list[idx1] # fixed the bug here: polygon_list[idx0], polygon_list[1]
         poly_area0, poly_area1 = polygon0.area, polygon1.area
         if poly_area0 > poly_area1:
-            del polygon_list[idx1]
+            # del polygon_list[idx1]
+            new_polygon_list.append(polygon_list[idx0])
         else:
-            del polygon_list[idx0]
-    return polygon_list
+            # del polygon_list[idx0]
+            new_polygon_list.append(polygon_list[idx1])
+        
+        indices_to_ignore.add(idx0)
+        indices_to_ignore.add(idx1)
+
+    for i in range(len(polygon_list)):
+        if i not in indices_to_ignore:
+            new_polygon_list.append(polygon_list[i])
+    return new_polygon_list
 
 def refine_rooms(polygon_list):
     access_mat = np.zeros((len(polygon_list), len(polygon_list)))
@@ -246,8 +291,13 @@ def refine_rooms(polygon_list):
 
 def remove_duplicate_corners(polygon_list):
     for poly_idx, polygon in enumerate(polygon_list):
+        if polygon.geom_type == 'MultiPolygon':
+            # Select the largest polygon by area
+            polygon = max(polygon.geoms, key=lambda p: p.area)
         poly_np = np.array(polygon.exterior.coords, dtype=np.uint8)[:-1]
         simplified_poly_np = simplify_polygon(poly_np)
+        if simplified_poly_np.shape[0] == 0:
+            continue
         # poly_np = simplified_poly_np
         poly_np = np.concatenate([simplified_poly_np, simplified_poly_np[None, 0]])
         update_polygon = Polygon(poly_np)
@@ -303,7 +353,8 @@ def refine_corners(polygon_list):
         
         # simplify corners
         room_corners = simplify_polygon(refine_corners)
-
+        if len(room_corners) < 3:
+            continue
         room_polys.append(Polygon(room_corners))
 
     return room_polys

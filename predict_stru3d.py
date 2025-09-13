@@ -33,6 +33,53 @@ from models.fri_net import build as build_model
 from shapely.ops import unary_union
 from util.postprocess_utils import postprocess
 
+from datasets.generate_occ import resize_and_pad
+
+
+class ImageDataset(Dataset):
+    def __init__(self, image_paths, num_image_channels=3, image_size=256, transform=None):
+        """
+        Args:
+            image_paths (list): List of image file paths.
+            transform (callable, optional): Optional transform to be applied on an image.
+        """
+        self.image_paths = image_paths
+        self.transform = transform
+        self.num_image_channels = num_image_channels
+        self.image_size = image_size
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def _expand_image_dims(self, x):
+        if len(x.shape) == 2:
+            exp_img = np.expand_dims(x, 0)
+        else:
+            exp_img = x.transpose((2, 0, 1)) # (h,w,c) -> (c,h,w)
+        return exp_img
+
+    def __getitem__(self, idx):
+        """
+        Args:
+            idx (int): Index of the image to fetch.
+
+        Returns:
+            torch.Tensor: Transformed image tensor.
+        """
+        img_path = self.image_paths[idx]
+        if self.num_image_channels == 3:
+            image = np.array(Image.open(img_path).convert("RGB"))  # Ensure 3-channel RGB
+        else:
+            image = np.array(Image.open(img_path))  # Ensure 1-channel RGB
+
+        image = resize_and_pad(image, (self.image_size, self.image_size))
+        image = (1/255) * torch.as_tensor(np.array(self._expand_image_dims(image)))
+        return {
+            'name': img_path,
+            'image': image,
+            }
+
+
 
 def get_args_parser():
     parser = argparse.ArgumentParser('FRI-Net', add_help=False)
@@ -105,6 +152,30 @@ def get_args_parser():
     parser.add_argument('--checkpoint', default="./checkpoints/pretrained_ckpt.pth", type=str)
     return parser
 
+
+def get_image_paths_from_directory(directory_path):
+    """
+    Load all images from the specified directory.
+
+    Args:
+        directory_path (str): Path to the directory containing images.
+
+    Returns:
+        list: A list of PIL Image objects.
+    """
+    paths = []
+    valid_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff')  # Add more extensions if needed
+
+    # Iterate through all files in the directory
+    for root, _, files in os.walk(directory_path):
+        for filename in files:
+            if filename.lower().endswith(valid_extensions):  # Check for valid image extensions
+                file_path = os.path.join(root, filename)
+                paths.append(file_path)
+
+    return paths
+
+
 def main(args):
     print(args)
 
@@ -129,8 +200,10 @@ def main(args):
     print(f'load ckpts from {args.checkpoint}')
 
     # Load test data
-    args.image_set = 'test'
-    dataset_eval = build_dataset('test', args)
+    # args.image_set = 'test'
+    # dataset_eval = build_dataset('test', args)
+    image_paths = get_image_paths_from_directory(args.img_folder)
+    dataset_eval = ImageDataset(image_paths, num_image_channels=args.input_channels)
     sampler_eval = torch.utils.data.SequentialSampler(dataset_eval)
 
     def trivial_batch_collator(batch):
@@ -212,7 +285,6 @@ def evaluate(model, data_loader, save_folder, args, save_primitive=True):
             else:
                 image_path = f"{args.img_folder}/{img_names[b_i]}.png"
 
-
             # img = cv2.imread(image_path)
             img = tensor_to_cv(images[b_i])
             scene_occ = shape_occ[b_i]
@@ -262,7 +334,6 @@ def evaluate(model, data_loader, save_folder, args, save_primitive=True):
                 pred_lines_lst = [pred_axis_line, pred_non_axis_line]
                 convex_occ_lst = [convex_occ_axis_line, convex_occ_non_axis_line]
 
-
                 for _ in range(2):
                     binary_mat = binary_mat_lst[_]
                     pred_lines_per_room = pred_lines_lst[_]
@@ -294,8 +365,6 @@ def evaluate(model, data_loader, save_folder, args, save_primitive=True):
                                 if len(box) > 0:
                                     convex_list.append(np.array(box, np.float32))
                                     color_idx_list.append(i % len(color_list))
-
-
   
                     # convert convexes to room polygon
                     for i in range(len(convex_list)):
@@ -327,9 +396,6 @@ def evaluate(model, data_loader, save_folder, args, save_primitive=True):
                         if polygon_list[_].is_valid:
                             polygon = polygon.union(polygon_list[_])
                     save_polygons.append(polygon)
-
-            # if '05968' in img_names[b_i]:
-            #     breakpoint()
             room_polys = postprocess(save_polygons)
             room_polys_list = [x.tolist() for x in room_polys]
             for room in room_polys:

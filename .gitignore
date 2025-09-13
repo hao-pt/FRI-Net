@@ -3,3 +3,5 @@ __pycache__/
 /results/
 /checkpoints/
 /models/ops/
+
+models/ops/functions/__pycache__/

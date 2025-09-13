@@ -37,6 +37,9 @@ def get_args_parser():
                         help='gradient clipping max norm')
     parser.add_argument('--sgd', action='store_true')
 
+    parser.add_argument('--input_channels', default=1, type=int)
+    parser.add_argument('--eval_every_epoch', type=int, default=20)
+
     # backbone
     parser.add_argument('--backbone', default='resnet50', type=str,
                         help="Name of the convolutional backbone to use")
@@ -158,6 +161,7 @@ def main(args):
     # Load data
     dataset_train = build_dataset('train', args)
     dataset_val = build_dataset('val', args)
+    dataset_train[0]
     sampler_train = torch.utils.data.RandomSampler(dataset_train)
     sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
@@ -217,7 +221,7 @@ def main(args):
 
     lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, args.lr_drop)
 
-    if args.resume is not None:
+    if args.resume is not None and os.path.exists(args.resume):
         print(f"resume")
         ckpt_path = f"{args.output_dir}/checkpoint_{args.phase}.pth"
         checkpoint = torch.load(ckpt_path, map_location='cpu')
@@ -253,12 +257,13 @@ def main(args):
     for epoch in range(args.start_epoch, args.epochs):
         train_stats= train_one_epoch(model, criterion, data_loader_train, optimizer, epoch, args)
         lr_scheduler.step()
-        eval_stats = eval(model, criterion, data_loader_val, epoch, args)
+        if (epoch + 1) % args.eval_every_epoch == 0:
+            eval_stats = eval(model, criterion, data_loader_val, epoch, args)
         if args.output_dir:
             output_dir = Path(args.output_dir)
             checkpoint_paths = [output_dir / f'checkpoint_{args.phase}.pth']
             # extra checkpoint before LR drop and every 100 epochs
-            if (epoch + 1) in args.lr_drop or (epoch + 1) % 100 == 0:
+            if (epoch + 1) in args.lr_drop or (epoch + 1) % 50 == 0:
                 checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}_{args.phase}.pth')
             for checkpoint_path in checkpoint_paths:
                 torch.save({
@@ -269,8 +274,9 @@ def main(args):
                     'args': args,
                 }, checkpoint_path)
             log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                        **{f'eval_{k}': v for k, v in eval_stats.items()},
                         'epoch': epoch}
+            if (epoch + 1) % args.eval_every_epoch == 0:
+                log_stats.update(**{f'eval_{k}': v for k, v in eval_stats.items()})
             print(f'write info into {output_dir}/log.txt')
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
